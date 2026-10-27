@@ -445,3 +445,84 @@ async def test_apply_patch_failed_status_not_overwritten_by_later_completed_op()
     assert raw_item["status"] == "failed"
     assert "Failed a.md" in result.output
     assert "Created b.md" in result.output
+
+
+class CallIdRecordingEditor(RecordingEditor):
+    """Records the call_id surfaced on each operation, so a host editor can tell
+    which apply_patch call an operation belongs to (including after approval resume)."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.call_ids: list[Any] = []
+
+    def create_file(self, operation: ApplyPatchOperation) -> ApplyPatchResult:
+        self.call_ids.append(operation.call_id)
+        return super().create_file(operation)
+
+    def update_file(self, operation: ApplyPatchOperation) -> ApplyPatchResult:
+        self.call_ids.append(operation.call_id)
+        return super().update_file(operation)
+
+    def delete_file(self, operation: ApplyPatchOperation) -> ApplyPatchResult:
+        self.call_ids.append(operation.call_id)
+        return super().delete_file(operation)
+
+
+@pytest.mark.asyncio
+async def test_apply_patch_editor_sees_call_id_on_operation() -> None:
+    """The editor must be able to correlate an operation with its tool call via
+    operation.call_id, even after an approval/resume cycle where needs_approval is
+    not called again."""
+
+    editor = CallIdRecordingEditor()
+    tool = ApplyPatchTool(editor=editor)
+    agent, context_wrapper, tool_run = build_apply_patch_call(
+        tool, "call_apply", {"type": "update_file", "path": "tasks.md", "diff": "-a\n+b\n"}
+    )
+
+    result = await ApplyPatchAction.execute(
+        agent=agent,
+        call=tool_run,
+        hooks=RunHooks[Any](),
+        context_wrapper=context_wrapper,
+        config=RunConfig(),
+    )
+
+    assert isinstance(result, ToolCallOutputItem)
+    assert editor.call_ids == ["call_apply"]
+
+
+@pytest.mark.asyncio
+async def test_apply_patch_editor_call_id_same_across_multi_operations() -> None:
+    """Every operation in one apply_patch call shares the same call_id."""
+
+    @dataclass
+    class MultiOpCall:
+        type: str
+        call_id: str
+        operations: list[dict[str, Any]]
+
+    editor = CallIdRecordingEditor()
+    tool = ApplyPatchTool(editor=editor)
+    multi_call = MultiOpCall(
+        type="apply_patch_call",
+        call_id="call_multi",
+        operations=[
+            {"type": "update_file", "path": "a.md", "diff": "-x\n+y\n"},
+            {"type": "create_file", "path": "b.md", "diff": "+hi\n"},
+        ],
+    )
+    agent = Agent(name="patcher", tools=[tool])
+    context_wrapper = make_context_wrapper()
+    tool_run = ToolRunApplyPatchCall(tool_call=multi_call, apply_patch_tool=tool)
+
+    result = await ApplyPatchAction.execute(
+        agent=agent,
+        call=tool_run,
+        hooks=RunHooks[Any](),
+        context_wrapper=context_wrapper,
+        config=RunConfig(),
+    )
+
+    assert isinstance(result, ToolCallOutputItem)
+    assert editor.call_ids == ["call_multi", "call_multi"]

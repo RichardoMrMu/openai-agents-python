@@ -1015,6 +1015,10 @@ class ApplyPatchAction:
                 operation_outputs: list[str] = []
                 editor = apply_patch_tool.editor
                 for operation in operations:
+                    # Surface the enclosing tool call id on the operation so a host
+                    # editor can correlate operations even on the approval/resume
+                    # path, where needs_approval is not invoked again.
+                    operation.call_id = call_id
                     if operation.type == "create_file":
                         result = editor.create_file(operation)
                     elif operation.type == "update_file":
